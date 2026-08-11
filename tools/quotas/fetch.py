@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import queue
+import subprocess
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +34,7 @@ OPENCODE_GO_MODELS_URL = "https://opencode.ai/zen/go/v1/models"
 OPENCODE_GO_DASHBOARD = "https://opencode.ai/workspace/{wid}/go"
 
 HttpFn = Callable[..., tuple[int, dict[str, str], bytes]]
+RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
 def _default_http(
@@ -46,6 +52,34 @@ def _default_http(
     except urllib.error.HTTPError as e:
         body = e.read() if hasattr(e, "read") else b""
         return e.code, {k.lower(): v for k, v in (e.headers.items() if e.headers else [])}, body
+
+
+def _http_with_retry(
+    http: HttpFn,
+    url: str,
+    *,
+    attempts: int = 3,
+    base_delay: float = 0.5,
+    **kwargs: Any,
+) -> tuple[int, dict[str, str], bytes]:
+    """Retry transient connection failures and temporary HTTP responses.
+
+    Authentication failures are deliberately not retried here; the provider
+    fetchers retain their existing token-refresh flow for HTTP 401.
+    """
+    last_error: BaseException | None = None
+    for attempt in range(attempts):
+        try:
+            result = http(url, **kwargs)
+            if result[0] not in RETRYABLE_HTTP_STATUS or attempt == attempts - 1:
+                return result
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                raise
+        time.sleep(base_delay * (2**attempt))
+    assert last_error is not None
+    raise last_error
 
 
 def _iso_from_unix(ts: Any) -> Optional[str]:
@@ -181,6 +215,124 @@ def normalize_codex_usage(payload: dict[str, Any], name: str = "codex") -> Quota
         detail=detail,
         windows=windows,
     )
+
+
+def _fetch_codex_app_server(timeout: float = 25.0) -> Optional[QuotaRecord]:
+    """Read limits through the installed Codex app-server JSON-RPC API.
+
+    This is the first-party integration surface used by Codex clients.  It is
+    preferable to calling a private chatgpt.com URL because the CLI owns OAuth
+    refresh, account selection and backend compatibility.
+    """
+    if os.name == "nt":
+        cmd = ["wsl", "-e", "sh", "-lc", "codex app-server --listen stdio://"]
+    else:
+        cmd = ["codex", "app-server", "--listen", "stdio://"]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+    except OSError:
+        return None
+    assert proc.stdin is not None and proc.stdout is not None
+    lines: queue.Queue[str] = queue.Queue()
+
+    def read_stdout() -> None:
+        for line in proc.stdout:
+            lines.put(line)
+
+    threading.Thread(target=read_stdout, daemon=True).start()
+
+    def send(message: dict[str, Any]) -> None:
+        proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+        proc.stdin.flush()
+
+    def receive(response_id: int) -> Optional[dict[str, Any]]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                message = json.loads(lines.get(timeout=max(0.1, deadline - time.monotonic())))
+            except (queue.Empty, json.JSONDecodeError):
+                continue
+            if message.get("id") == response_id:
+                return message
+        return None
+
+    try:
+        send({
+            "method": "initialize",
+            "id": 1,
+            "params": {"clientInfo": {"name": "epaper_quota", "title": "E-paper Quota", "version": "1.0.0"}},
+        })
+        if not receive(1):
+            return None
+        send({"method": "initialized"})
+        send({"method": "account/rateLimits/read", "id": 7})
+        response = receive(7)
+        if not response or response.get("error"):
+            return None
+        limits = ((response.get("result") or {}).get("rateLimits") or {})
+        raw_windows = [limits.get("primary"), limits.get("secondary")]
+        windows: list[dict[str, Any]] = []
+        for raw in raw_windows:
+            if not isinstance(raw, dict) or raw.get("usedPercent") is None:
+                continue
+            mins = raw.get("windowDurationMins")
+            try:
+                seconds = int(float(mins) * 60) if mins is not None else None
+            except (TypeError, ValueError):
+                seconds = None
+            windows.append({
+                "label": "week" if seconds and seconds >= 5 * 86400 else "5h",
+                "used_percent": float(raw["usedPercent"]),
+                "remaining_percent": max(0.0, 100.0 - float(raw["usedPercent"])),
+                "reset_at": _iso_from_unix(raw.get("resetsAt")),
+                "window_seconds": seconds,
+            })
+        if not windows:
+            return None
+        primary = windows[0]
+        return QuotaRecord(
+            name="codex",
+            status="ok",
+            used_percent=primary["used_percent"],
+            remaining_percent=primary["remaining_percent"],
+            reset_at=primary["reset_at"],
+            detail=f"official app-server · {limits.get('planType') or ''}".rstrip(),
+            windows=windows,
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def _native_curl_get(url: str, headers: dict[str, str], timeout: float = 25.0) -> tuple[int, dict[str, str], bytes]:
+    """GET through Windows curl, avoiding urllib/OpenSSL proxy TLS failures."""
+    if os.name != "nt":
+        raise OSError("native curl fallback is only available on Windows")
+    config = [f'url = "{url}"', "silent", "show-error", "location", f"max-time = {int(timeout)}"]
+    for key, value in headers.items():
+        safe = value.replace("\\", "\\\\").replace('"', '\\"')
+        config.append(f'header = "{key}: {safe}"')
+    proc = subprocess.run(
+        ["curl.exe", "--write-out", "\\n%{http_code}", "--config", "-"],
+        input="\n".join(config) + "\n",
+        text=True,
+        capture_output=True,
+        timeout=timeout + 5,
+    )
+    if proc.returncode != 0:
+        raise OSError((proc.stderr or "native curl failed").strip())
+    body, _, status_text = proc.stdout.rpartition("\n")
+    return int(status_text), {}, body.encode()
 
 
 def normalize_grok_billing(payload: dict[str, Any], name: str = "grok") -> QuotaRecord:
@@ -415,7 +567,8 @@ def _refresh_codex(cred: Credential, http: HttpFn) -> Optional[str]:
             "client_id": CODEX_CLIENT_ID,
         }
     ).encode()
-    status, _, raw = http(
+    status, _, raw = _http_with_retry(
+        http,
         CODEX_TOKEN_URL,
         method="POST",
         headers={
@@ -465,7 +618,8 @@ def _refresh_grok(cred: Credential, http: HttpFn) -> Optional[str]:
             "client_id": cred.oidc_client_id,
         }
     ).encode()
-    status, _, raw = http(
+    status, _, raw = _http_with_retry(
+        http,
         GROK_TOKEN_URL,
         method="POST",
         headers={
@@ -510,6 +664,13 @@ def _refresh_grok(cred: Credential, http: HttpFn) -> Optional[str]:
 def fetch_codex(cred: Credential, http: HttpFn = _default_http) -> QuotaRecord:
     if not cred.present or not cred.access_token:
         return unavailable("codex", "no local ~/.codex/auth.json tokens")
+    # With the normal transport, delegate auth and quota compatibility to the
+    # installed first-party Codex app-server. Injected HTTP functions in tests
+    # intentionally retain the direct path below.
+    if http is _default_http:
+        official = _fetch_codex_app_server()
+        if official is not None:
+            return official
     headers = {
         "Authorization": f"Bearer {cred.access_token}",
         "Accept": "application/json",
@@ -517,12 +678,12 @@ def fetch_codex(cred: Credential, http: HttpFn = _default_http) -> QuotaRecord:
     }
     if cred.account_id:
         headers["ChatGPT-Account-Id"] = cred.account_id
-    status, _, raw = http(CODEX_USAGE_URL, headers=headers)
+    status, _, raw = _http_with_retry(http, CODEX_USAGE_URL, headers=headers)
     if status == 401:
         new = _refresh_codex(cred, http)
         if new:
             headers["Authorization"] = f"Bearer {new}"
-            status, _, raw = http(CODEX_USAGE_URL, headers=headers)
+            status, _, raw = _http_with_retry(http, CODEX_USAGE_URL, headers=headers)
     if status != 200:
         return error("codex", f"HTTP {status}: {raw[:180].decode(errors='replace')}")
     try:
@@ -542,12 +703,20 @@ def fetch_grok(cred: Credential, http: HttpFn = _default_http) -> QuotaRecord:
         "x-grok-client-surface": "grok-build",
         "x-grok-client-version": "1.0.0",
     }
-    status, _, raw = http(GROK_BILLING_URL, headers=headers)
+    try:
+        status, _, raw = _http_with_retry(http, GROK_BILLING_URL, headers=headers)
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+        if http is not _default_http:
+            raise
+        status, _, raw = _native_curl_get(GROK_BILLING_URL, headers)
     if status == 401:
         new = _refresh_grok(cred, http)
         if new:
             headers["Authorization"] = f"Bearer {new}"
-            status, _, raw = http(GROK_BILLING_URL, headers=headers)
+            try:
+                status, _, raw = _http_with_retry(http, GROK_BILLING_URL, headers=headers)
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+                status, _, raw = _native_curl_get(GROK_BILLING_URL, headers)
     if status != 200:
         return error("grok", f"HTTP {status}: {raw[:180].decode(errors='replace')}")
     try:
@@ -851,9 +1020,10 @@ def fetch_opencode_go(cred: Credential, http: HttpFn = _default_http) -> QuotaRe
             },
         )
         if status == 200:
-            return unavailable(
-                "opencode-go",
-                "API key ok; usage needs OPENCODE_GO_WORKSPACE_ID+OPENCODE_GO_AUTH_COOKIE",
+            return QuotaRecord(
+                name="opencode-go",
+                status="key ok",
+                detail="Go key verified; usage needs console login",
             )
         return error("opencode-go", f"API key rejected HTTP {status}")
     return unavailable("opencode-go", "no usable credential")

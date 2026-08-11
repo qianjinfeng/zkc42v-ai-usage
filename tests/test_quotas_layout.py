@@ -163,7 +163,7 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(_relative_reset({"reset_at": "2026-08-09T11:00:00+00:00"}, now), "已重置")
         self.assertEqual(_relative_reset({"missing": True}, now), "—")
 
-    def test_codex_grok_side_by_side(self):
+    def test_services_use_full_width_rows(self):
         from datetime import datetime, timezone
 
         now = datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc)
@@ -178,10 +178,10 @@ class LayoutTests(unittest.TestCase):
                         n += 1
             return n
 
-        # row0 (y0=52) holds codex (left half) and grok (right half), one text
-        # line at y0+11
-        self.assertGreater(ink(10, 190, 63, 78), 0, "codex detail should be in the left half")
-        self.assertGreater(ink(210, 390, 63, 78), 0, "grok detail should be in the right half")
+        # Codex occupies row 1 and Grok row 2. The right half of each row
+        # contains its status/value, giving text twice the old card width.
+        self.assertGreater(ink(150, 390, 46, 82), 0, "codex value should use the full-width row")
+        self.assertGreater(ink(150, 390, 82, 118), 0, "grok value should use the full-width row")
 
     def test_daodejing_cache(self):
         quotes = load_quotes()
@@ -207,19 +207,17 @@ class LayoutTests(unittest.TestCase):
                         n += 1
             return n
 
-        # codex (top-left card): the multi-window reset line is below the
-        # title/balance line in the new 2x2 card layout.
+        # Codex reset times are in the right side of the first service row.
         self.assertGreater(
-            ink(0, 200, 80, 125),
+            ink(150, 400, 65, 90),
             0,
-            "codex reset time should be visible in the top-left card",
+            "codex reset time should be visible in the first row",
         )
-        # opencode-go (bottom-right card): the trailing week reset remains
-        # visible even when the adaptive quote panel changes card height.
+        # opencode-go reset times remain visible in the fourth service row.
         self.assertGreater(
-            ink(200, 400, 165, 235),
+            ink(150, 400, 170, 225),
             0,
-            "opencode-go reset line should stay visible in the bottom-right card",
+            "opencode-go reset line should stay visible in the fourth row",
         )
 
     def test_blank_detection(self):

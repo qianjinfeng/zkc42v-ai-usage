@@ -154,6 +154,8 @@ def run_once(args: argparse.Namespace) -> int:
         import subprocess
 
         cmd = [str(ble), "send", uuid, str(frame_path)]
+        if ble.suffix.lower() == ".py":
+            cmd = [sys.executable, *cmd]
         print("running:", " ".join(cmd), file=sys.stderr)
         rc = subprocess.call(cmd)
         if rc != 0:
@@ -198,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--bleprobe",
-        default=str(_ROOT / "build" / "bleprobe"),
+        default=str(_ROOT / ("bleprobe.py" if os.name == "nt" else Path("build") / "bleprobe")),
         help="Path to bleprobe binary",
     )
     ap.add_argument(
