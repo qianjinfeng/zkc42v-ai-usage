@@ -60,6 +60,8 @@ def format_beijing(dt_or_iso: datetime | str, fmt: str = "%m-%d %H:%M") -> str:
 
 
 _FONTS_DIR = Path(__file__).resolve().parents[2] / "fonts"
+_HOS_BOLD = _FONTS_DIR / "HarmonyOS_Sans_SC_Bold.ttf"
+_HOS_REGULAR = _FONTS_DIR / "HarmonyOS_Sans_SC_Regular.ttf"
 
 
 def _font(size: int, *, bold: bool = True) -> ImageFont.ImageFont:
@@ -81,6 +83,11 @@ def _font(size: int, *, bold: bool = True) -> ImageFont.ImageFont:
                 return ImageFont.truetype(p, size)
             except Exception:
                 continue
+        for p in (str(_HOS_BOLD), str(_HOS_REGULAR)):
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                continue
         roboto = _FONTS_DIR / "Roboto.ttf"
         if roboto.is_file():
             try:
@@ -95,6 +102,9 @@ def _font(size: int, *, bold: bool = True) -> ImageFont.ImageFont:
             "/Library/Fonts/Arial.ttf",
             "/System/Library/Fonts/Menlo.ttc",
             "/System/Library/Fonts/SFNSMono.ttf",
+            str(_HOS_REGULAR),
+            str(_HOS_BOLD),
+            str(_FONTS_DIR / "Roboto.ttf"),
         ):
             try:
                 return ImageFont.truetype(p, size)
@@ -477,13 +487,28 @@ def draw_logo(d, x: float, y: float, size: float, kind: str, ink, bg) -> None:
         )
 
 
-def _cjk_font(size: int) -> ImageFont.ImageFont:
-    """CJK text (农历/节气/干支) — Heiti (STHeiti) keeps the clean sans look."""
-    for p in (
+def _cjk_font(size: int, *, bold: bool = True) -> ImageFont.ImageFont:
+    """CJK text (农历/节气/干支/道德经) — HarmonyOS Sans SC by default.
+
+    Huawei's HarmonyOS Sans has even, generous strokes that survive the 1-bit
+    BWR quantization far better than Microsoft YaHei's thinner glyphs at panel
+    resolution; it also covers Latin, keeping mixed text consistent. Falls back
+    to Heiti (macOS) / SimHei-YaHei (Windows).
+    """
+    if bold:
+        candidates = [str(_HOS_BOLD), str(_HOS_REGULAR)]
+    else:
+        candidates = [str(_HOS_REGULAR), str(_HOS_BOLD)]
+    candidates += [
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/Library/Fonts/Arial Unicode.ttf",
-    ):
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+    ]
+    for p in candidates:
         try:
             return ImageFont.truetype(p, size)
         except Exception:
@@ -522,32 +547,36 @@ def render_quota_image(
 ) -> Image.Image:
     """Render a compact, high-contrast BWR quota dashboard.
 
-    The four services use a 2x2 card grid. Single-window services get a large
-    remaining percentage; multi-window services get balance and reset lines.
+    The four services use full-width rows.  A 400 px e-paper panel is much
+    easier to read this way than as four 200 px cards: names never collide
+    with values, error details do not truncate as aggressively, and the
+    important percentages can stay large.
     """
     recs = list(records)
-    # Supersample 2x then LANCZOS-downscale so small text keeps smooth 1-bit
-    # edges instead of quantized-AA jaggies (panel is BWR-only, no grays).
-    S = 2
+    # Render at the panel's native resolution. FreeType's hinting can then snap
+    # stems to the actual pixel grid. Supersampling + LANCZOS followed by BWR
+    # thresholding creates broken gray edge fragments on a physical 1-bit
+    # plane, which look much rougher than the source PNG suggests.
+    S = 1
     img = Image.new("RGB", (W * S, H * S), WHITE)
     d = _ScaledDraw(ImageDraw.Draw(img), S)
 
     bj = beijing_now(now)
 
-    # Font sizes below are display pixels; the actual font objects are 2x
-    # because the canvas is supersampled.
+    # Font sizes are physical display pixels so font hinting matches the panel.
     header_title_f = _font(13 * S, bold=True)
     header_time_f = _font(22 * S, bold=True)
     header_cjk_f = _cjk_font(15 * S)
-    name_f = _font(14 * S, bold=True)
-    hero_f = _font(23 * S, bold=True)
-    latin_f = _font(12 * S, bold=True)
-    balance_f = _font(17 * S, bold=True)
-    cjk_detail_f = _cjk_font(11 * S)
-    alert_f = _font(12 * S, bold=True)
-    alert_detail_f = _font(10 * S, bold=False)
-    quote_f = _cjk_font(21 * S)
-    quote_explain_f = _cjk_font(12 * S)
+    name_f = _font(17 * S, bold=True)
+    sub_f = _font(10 * S, bold=True)
+    hero_f = _font(30 * S, bold=True)
+    latin_f = _font(13 * S, bold=True)
+    balance_f = _font(22 * S, bold=True)
+    cjk_detail_f = _cjk_font(13 * S)
+    alert_f = _font(16 * S, bold=True)
+    alert_detail_f = _font(12 * S, bold=True)
+    quote_f = _cjk_font(19 * S)
+    quote_explain_f = _cjk_font(12 * S, bold=True)
 
     # --- Header: title + clock on the first line, Chinese calendar below. ---
     header_h = 46
@@ -568,17 +597,16 @@ def render_quota_image(
     q_line_h = max(1, round(quote_f.size / S * 1.12))
     e_line_h = max(1, round(quote_explain_f.size / S * 1.16))
     if quote.get("q"):
-        q_lines = _wrap_cjk(d, quote["q"], quote_f, W - 16, 2)
-        e_lines = _wrap_cjk(d, quote["e"], quote_explain_f, W - 16, 2)
+        q_lines = _wrap_cjk(d, quote["q"], quote_f, W - 16, 1)
+        e_lines = _wrap_cjk(d, quote["e"], quote_explain_f, W - 16, 1)
 
     # Shrink the quote panel for short quotes and let the service cards use the
     # recovered pixels. Long quotes still get enough height for two lines of
     # text plus a small top/bottom breathing room.
     quote_content_h = 7 + q_line_h * len(q_lines) + 4 + e_line_h * len(e_lines) + 7
-    # Keep the 2x2 service cards compact.  The quote content rarely needs the
-    # full minimum; reserving this fixed lower band prevents the cards from
-    # growing into large, mostly empty rectangles.
-    quote_h = max(112, quote_content_h)
+    # Reserve a compact lower band; full-width service rows use the recovered
+    # height for larger, sturdier glyphs.
+    quote_h = max(58, quote_content_h)
     quote_y0 = H - quote_h
     if q_lines:
         quote_block_h = q_line_h * len(q_lines) + 4 + e_line_h * len(e_lines)
@@ -592,86 +620,63 @@ def render_quota_image(
             y += e_line_h
     d.line([(0, quote_y0 - 1), (W, quote_y0 - 1)], fill=BLACK, width=1)
 
-    # --- Service area: four equal cards in a 2x2 grid. ---
-    rows = (("codex", "grok"), ("kimi", "opencode-go"))
+    # --- Service area: four full-width rows. ---
+    rows = ("codex", "grok", "kimi", "opencode-go")
     top = header_h
     row_h = (quote_y0 - top) // len(rows)
     kind_label = {"5h": "5h", "week": "wk"}
     records_by_name = {r.name: r for r in recs}
 
-    for ri, row_names in enumerate(rows):
+    for ri, name in enumerate(rows):
         y0 = top + ri * row_h
         if ri > 0:
             d.line([(0, y0), (W, y0)], fill=BLACK, width=1)
-        ncols = len(row_names)
-        for si, name in enumerate(row_names):
-            col_x0 = si * (W // ncols)
-            col_x1 = W if si == ncols - 1 else (si + 1) * (W // ncols)
-            if si > 0:
-                d.line([(col_x0, y0), (col_x0, y0 + row_h)], fill=BLACK, width=1)
+        rec = records_by_name.get(name) or QuotaRecord(name=name, status="unavailable", detail="missing")
+        alert = _is_alert(rec)
+        logo_kind = {"opencode-go": "opencode"}.get(name, name)
+        cy = y0 + row_h / 2
+        draw_logo(d, 16, cy, 17.0, logo_kind, BLACK, WHITE)
+        d.text((29, y0 + 4), name, fill=(RED if alert else BLACK), font=name_f)
 
-            rec = records_by_name.get(name)
-            if rec is None:
-                rec = QuotaRecord(name=name, status="unavailable", detail="missing")
-            ink = BLACK
-            alert = _is_alert(rec)
-            text_y = y0 + 6
-            logo_kind = {"opencode-go": "opencode"}.get(name, name)
-            draw_logo(d, col_x0 + 16, y0 + 18, 17.0, logo_kind, ink, WHITE)
-            name_x = col_x0 + 28
-            d.text((name_x, text_y), name, fill=(RED if alert else ink), font=name_f)
+        # Use the previously empty lower-left corner for a compact plan/source
+        # label. This makes the row denser without competing with quota values.
+        detail = (rec.detail or "").lower()
+        if name == "codex":
+            subtitle = "PLUS · OFFICIAL" if "plus" in detail else "OFFICIAL"
+        elif name == "grok":
+            subtitle = "WEEKLY" if "weekly" in detail else "GROK BUILD"
+        elif name == "kimi":
+            subtitle = "CODING PLAN"
+        else:
+            subtitle = "GO PLAN"
+        d.text((29, y0 + 28), subtitle, fill=BLACK, font=sub_f)
 
-            windows: list[dict[str, Any]] = []
-            if rec.status == "ok":
-                slots = pick_display_windows(rec)
-                windows = [w for w in slots if not w.get("missing")]
-                if len(windows) == 1:
-                    # Large hero on the title line; label and reset below it.
-                    w = windows[0]
-                    kind = str(w.get("kind") or "?")
-                    tag = kind_label.get(kind, kind)
-                    parts = [
-                        (f"{tag} · ", ink, latin_f),
-                        (_relative_reset(w, now), ink, cjk_detail_f),
-                    ]
-                    _draw_runs(d, col_x0 + 8, y0 + 36, parts, latin_f)
-                else:
-                    # Separate balance and reset rows so long values cannot
-                    # collide with the service name or leave the half-card.
-                    balance_parts: list[tuple[str, tuple[int, int, int], object]] = []
-                    reset_parts: list[tuple[str, tuple[int, int, int], object]] = []
-                    for wi, w in enumerate(windows):
-                        if wi:
-                            balance_parts.append(("   ", ink, latin_f))
-                            reset_parts.append((" / ", ink, latin_f))
-                        kind = str(w.get("kind") or "?")
-                        tag = kind_label.get(kind, kind)
-                        balance_parts.append((f"{tag} ", ink, latin_f))
-                        balance_parts.extend([(t, c, balance_f) for t, c in _balance_parts(w)])
-                        reset_parts.append((_relative_reset(w, now), ink, cjk_detail_f))
-                    _draw_runs(d, col_x0 + 8, y0 + 34, balance_parts, latin_f)
-                    _draw_runs(d, col_x0 + 8, y0 + 53, reset_parts, latin_f)
-            else:
-                # Status and detail get their own lines instead of crowding
-                # the service name on a single baseline.
-                d.text((col_x0 + 8, y0 + 34), rec.status.upper(), fill=RED, font=alert_f)
-                msg = rec.detail or "no details"
-                if len(msg) > 22:
-                    msg = msg[:19] + "..."
-                d.text((col_x0 + 8, y0 + 53), msg, fill=BLACK, font=alert_detail_f)
+        if rec.status != "ok":
+            d.text((151, y0 + 4), rec.status.upper(), fill=RED, font=alert_f)
+            msg = rec.detail or "no details"
+            if len(msg) > 36:
+                msg = msg[:33] + "..."
+            d.text((151, y0 + 27), msg, fill=BLACK, font=alert_detail_f)
+            continue
 
-            # Only single-window services get the large hero; multi-window
-            # cards already show every balance on their second line.
-            if len(windows) <= 1:
-                hero = _remaining(rec)
-                if hero is not None:
-                    hero_txt = f"{hero:.0f}%"
-                    hw = d.textbbox((0, 0), hero_txt, font=hero_f)[2]
-                    d.text((col_x1 - 10 - hw, text_y), hero_txt, fill=RED, font=hero_f)
+        windows = [w for w in pick_display_windows(rec) if not w.get("missing")]
+        if len(windows) == 1:
+            w = windows[0]
+            tag = kind_label.get(str(w.get("kind") or "?"), "?")
+            hero_txt = "".join(t for t, _ in _balance_parts(w))
+            hero_w = d.textbbox((0, 0), hero_txt, font=hero_f)[2]
+            d.text((W - 12 - hero_w, y0 - 4), hero_txt, fill=RED, font=hero_f)
+            d.text((151, y0 + 30), f"{tag}  {_relative_reset(w, now)}", fill=BLACK, font=cjk_detail_f)
+        else:
+            # Fixed columns make both windows instantly scannable and keep
+            # their reset time directly below the corresponding percentage.
+            for x, w in zip((151, 277), windows[:2]):
+                tag = kind_label.get(str(w.get("kind") or "?"), "?")
+                d.text((x, y0 + 2), tag, fill=BLACK, font=latin_f)
+                _draw_runs(d, x + 25, y0, [(t, c, balance_f) for t, c in _balance_parts(w)], balance_f)
+                d.text((x, y0 + 30), _relative_reset(w, now), fill=BLACK, font=cjk_detail_f)
 
-    # Downscale the supersampled render → smooth small text, then snap the
-    # anti-aliased grays to pure BWR so the panel gets hard edges + real red plane
-    img = img.resize((W, H), Image.LANCZOS)
+    # Snap FreeType's native-resolution antialiasing to the three panel inks.
     return quantize_bwr(img)
 
 

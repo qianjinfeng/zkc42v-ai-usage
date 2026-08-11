@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -46,7 +48,47 @@ class Credential:
         }
 
 
+@functools.lru_cache(maxsize=1)
+def _wsl_home() -> Optional[Path]:
+    """On Windows, resolve the Linux home dir of the default WSL distro.
+
+    The CLI tools (codex/grok/kimi/opencode-go) may live inside WSL, so their
+    credential files (~/.codex/auth.json, ...) are reached over the
+    \\\\wsl.localhost UNC share rather than the Windows profile.
+    """
+    try:
+        out = subprocess.run(
+            ["wsl", "-e", "sh", "-c", 'echo "$HOME"'],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        posix = (out.stdout or "").strip()
+        if not posix.startswith("/"):
+            return None
+        win = subprocess.run(
+            ["wsl", "-e", "wslpath", "-w", posix],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        wp = (win.stdout or "").strip()
+        if wp:
+            return Path(wp)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return None
+
+
 def _home() -> Path:
+    for env in ("EPAPER_HOME", "EPAPER_CRED_HOME"):
+        val = os.environ.get(env, "").strip()
+        if val:
+            return Path(val)
+    if os.name == "nt":
+        wsl = _wsl_home()
+        if wsl is not None and wsl.is_dir():
+            return wsl
     return Path(os.path.expanduser("~"))
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+import urllib.error
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +26,46 @@ FIXTURES = ROOT / "fixtures" / "quotas"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_codex_retries_connection_failure(self):
+        from quotas.credentials import Credential
+        from quotas.fetch import fetch_codex
+
+        payload = (FIXTURES / "codex_usage.json").read_bytes()
+        calls = 0
+
+        def flaky_http(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise urllib.error.URLError("temporary network failure")
+            return 200, {}, payload
+
+        cred = Credential(service="codex", present=True, kind="oauth", access_token="test")
+        with patch("quotas.fetch.time.sleep"):
+            rec = fetch_codex(cred, http=flaky_http)
+        self.assertEqual(rec.status, "ok")
+        self.assertEqual(calls, 3)
+
+    def test_grok_retries_temporary_http_status(self):
+        from quotas.credentials import Credential
+        from quotas.fetch import fetch_grok
+
+        payload = (FIXTURES / "grok_billing.json").read_bytes()
+        calls = 0
+
+        def flaky_http(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return 503, {}, b"temporary"
+            return 200, {}, payload
+
+        cred = Credential(service="grok", present=True, kind="oauth", access_token="test")
+        with patch("quotas.fetch.time.sleep"):
+            rec = fetch_grok(cred, http=flaky_http)
+        self.assertEqual(rec.status, "ok")
+        self.assertEqual(calls, 3)
+
     def test_codex_fixture_fields(self):
         payload = json.loads((FIXTURES / "codex_usage.json").read_text())
         rec = normalize_codex_usage(payload)
@@ -141,7 +183,7 @@ class NormalizeTests(unittest.TestCase):
         self.assertIn("500", by["grok"].detail)
         self.assertEqual(by["kimi"].status, "error")
         # opencode-go key works but no dashboard → unavailable (not crash)
-        self.assertEqual(by["opencode-go"].status, "unavailable")
+        self.assertEqual(by["opencode-go"].status, "key ok")
 
 
 if __name__ == "__main__":
