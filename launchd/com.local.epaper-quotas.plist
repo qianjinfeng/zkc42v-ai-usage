@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Periodic e-paper AI quota dashboard.
+
+  Default interval: 900 seconds (15 minutes).
+  Install (user LaunchAgent):
+    cp launchd/com.local.epaper-quotas.plist ~/Library/LaunchAgents/
+    # Edit: WorkingDirectory / ProgramArguments (your repo path),
+    #        EPAPER_UUID (your tag UUID, from `./epaper.sh scan`).
+    launchctl load ~/Library/LaunchAgents/com.local.epaper-quotas.plist
+
+  Unload:
+    launchctl unload ~/Library/LaunchAgents/com.local.epaper-quotas.plist
+
+  Or use the in-process loop without launchd:
+    ./epaper.sh quotas-loop 900
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.epaper-quotas</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/zzmima0000/Documents/ChatGPT/e-paper/epaper.sh</string>
+    <string>quotas</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/zzmima0000/Documents/ChatGPT/e-paper</string>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/epaper-quotas.launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/epaper-quotas.launchd.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>EPAPER_UUID</key>
+    <string>__YOUR_TAG_UUID__</string>
+    <key>EPAPER_QUOTA_OUT</key>
+    <string>/tmp</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+  </dict>
+</dict>
+</plist>

@@ -677,46 +677,69 @@ class SendProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
         print("frame: \(frame.w)x\(frame.h), black \(frame.black.count)B red \(frame.red.count)B")
 
-        var writes: [(Data, CBCharacteristicWriteType)] = []
-        // 1. INIT (with driver model for 4.2" BWR: 0x02 SSD1619 / 0x03 UC8176)
+        // Proven sequence for ZKC42V / GR5513 v1.10 (user-confirmed for clock/bigtest):
+        //   INIT(0x01, model) → SET_SLOT(0x31,[0,slot]) → WRITE_IMG RLE → REFRESH(0x05)
+        // Avoid extras that regress on this firmware:
+        //   SLEEP(0x06)  → can leave full black after a good refresh
+        //   SET_SLIDE    → unknown payload; empty slots are black RAM → flash then black
+        //   SET_TIME     → force GUI; MODE_PICTURE = fill white
+        struct Step {
+            let data: Data
+            let type: CBCharacteristicWriteType
+            let delayAfter: TimeInterval
+            let label: String?
+        }
+        var steps: [Step] = []
+
         let initModel: UInt8 = initParam?.first ?? 0x02
-        writes.append((Data([0x01, initModel]), .withResponse))
-        print("+ INIT model=0x\(String(format: "%02x", initModel))")
+        steps.append(Step(data: Data([0x01, initModel]), type: .withResponse,
+                          delayAfter: 0.20, label: "INIT model=0x\(String(format: "%02x", initModel))"))
 
-        // 2. SET_SLOT(0x31) — select slot 0 before writing
-        writes.append((Data([0x31, 0x00, 0x00]), .withResponse))
-        print("+ SET_SLOT slot=0")
+        steps.append(Step(data: Data([0x31, 0x00, 0x00]), type: .withResponse,
+                          delayAfter: 0.05, label: "SET_SLOT slot=0"))
 
-        // 3. RLE-compress each plane (firmware advertises rle=1)
-        // flags: begin -> 0x04(rle) | 0x02(begin) | (bw?0:1); continue -> 0x04 | plane
         let blackRle = rleCompress(frame.black)
         let redRle = rleCompress(frame.red)
         print("+ black \(frame.black.count)B -> RLE \(blackRle.count)B, red \(frame.red.count)B -> RLE \(redRle.count)B")
 
-        let chunk = 233  // RLE chunk: keep codes intact; safe cap
-        appendRleChunks(&writes, plane: blackRle, planeFlag: 0, chunk: chunk)
-        appendRleChunks(&writes, plane: redRle, planeFlag: 1, chunk: chunk)
+        let chunk = 233
+        var planeWrites: [(Data, CBCharacteristicWriteType)] = []
+        appendRleChunks(&planeWrites, plane: blackRle, planeFlag: 0, chunk: chunk)
+        appendRleChunks(&planeWrites, plane: redRle, planeFlag: 1, chunk: chunk)
+        for (i, w) in planeWrites.enumerated() {
+            let isLast = i == planeWrites.count - 1
+            // Slightly longer pause after last plane so RAM is settled before REFRESH
+            steps.append(Step(data: w.0, type: w.1,
+                              delayAfter: isLast ? 0.20 : 0.03, label: nil))
+        }
 
-        // 4. refresh
-        writes.append((Data([0x05]), .withResponse))
-        print("total \(writes.count) writes, starting ...")
+        steps.append(Step(data: Data([0x05]), type: .withResponse,
+                          delayAfter: 1.0, label: "REFRESH"))
+
+        print("total \(steps.count) steps, starting ...")
+        for s in steps where s.label != nil {
+            print("+ \(s.label!)")
+        }
+
         var idx = 0
         func next() {
-            guard idx < writes.count else {
-                print("all writes done, listening 8s ...")
-                DispatchQueue.global().asyncAfter(deadline: .now() + 8) {
+            guard idx < steps.count else {
+                // Keep link up while the panel finishes the physical refresh (~1–3s)
+                print("all writes done, listening 15s (hold BLE while EPD refreshes) ...")
+                DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
                     self.save()
                     exit(0)
                 }
                 return
             }
-            let (data, type) = writes[idx]
+            let step = steps[idx]
             idx += 1
-            if idx % 100 == 1 || idx == writes.count {
-                print("[+\(Int(Date().timeIntervalSince(startTime)))s] write \(idx)/\(writes.count)")
+            if idx == 1 || idx == steps.count || idx % 50 == 0 {
+                print("[+\(Int(Date().timeIntervalSince(startTime)))s] step \(idx)/\(steps.count)"
+                      + (step.label.map { " (\($0))" } ?? ""))
             }
-            peripheral.writeValue(data, for: cmd, type: type)
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.03) {
+            peripheral.writeValue(step.data, for: cmd, type: step.type)
+            DispatchQueue.global().asyncAfter(deadline: .now() + step.delayAfter) {
                 next()
             }
         }

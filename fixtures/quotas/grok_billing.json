@@ -1,0 +1,16 @@
+{
+  "config": {
+    "currentPeriod": {
+      "type": "USAGE_PERIOD_TYPE_WEEKLY",
+      "start": "2026-08-02T02:33:59.492637+00:00",
+      "end": "2026-08-09T02:33:59.492637+00:00"
+    },
+    "creditUsagePercent": 80.0,
+    "billingPeriodStart": "2026-08-02T02:33:59.492637+00:00",
+    "billingPeriodEnd": "2026-08-09T02:33:59.492637+00:00",
+    "productUsage": [
+      { "product": "GrokBuild", "usagePercent": 36.0 },
+      { "product": "GrokChat", "usagePercent": 16.0 }
+    ]
+  }
+}

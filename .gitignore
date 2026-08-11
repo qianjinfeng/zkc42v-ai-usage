@@ -1,2 +1,19 @@
+# Build / binary artifacts
 build/
+*.bin
+
+# Local runtime captures: BLE scans / profiles / send logs contain the tag's
+# UUID + MAC — never commit them.
 data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Local secrets / credentials snapshots (never commit real tokens)
+*_auth.json
+.env
