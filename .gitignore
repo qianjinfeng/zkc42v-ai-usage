@@ -1,3 +1,5 @@
+apk_backup/
+*.apk
 # Build / binary artifacts
 build/
 *.bin
