@@ -1,5 +1,6 @@
 apk_backup/
 *.apk
+!ZkongESL_6.8.0.apk
 # Build / binary artifacts
 build/
 *.bin
